@@ -1,11 +1,11 @@
 [build]
-  command = "npm run build"
+  command = "yarn build"
   publish = "dist"
 
 [build.environment]
   NODE_VERSION = "20"
 
-# ── React Router: send all routes to index.html ───────────────────────────────
+# React Router: send all routes to index.html
 [[redirects]]
   from = "/*"
   to = "/index.html"
