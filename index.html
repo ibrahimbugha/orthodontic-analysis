@@ -295,64 +295,148 @@ function deleteFromArchive(pid){
   localStorage.setItem(ARCHIVE_KEY,JSON.stringify(arr));
 }
 
-// ── Face detection ─────────────────────────────────────────────────────────────
-async function detectAndRefine(imgEl, photoType){
+// ── Thumbnail generation ────────────────────────────────────────────────────────
+async function generateThumbnail(src,maxW=220){
+  return new Promise(res=>{
+    const img=new Image();img.crossOrigin='anonymous';
+    img.onload=()=>{
+      const s=maxW/img.naturalWidth;
+      const c=document.createElement('canvas');
+      c.width=maxW;c.height=Math.round(img.naturalHeight*s);
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+      res(c.toDataURL('image/jpeg',.65));
+    };
+    img.onerror=()=>res(null);img.src=src;
+  });
+}
+
+// ── Archive backup / restore ────────────────────────────────────────────────────
+function exportArchiveBackup(){
+  const json=JSON.stringify(loadArchive());
+  const blob=new Blob([json],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;
+  a.download=`ortho_backup_${new Date().toISOString().slice(0,10)}.json`;
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url),1e3);
+}
+function importArchiveBackup(file,onDone){
+  const r=new FileReader();
+  r.onload=e=>{
+    try{
+      const data=JSON.parse(e.target.result);
+      if(!Array.isArray(data)) throw new Error('Not an array');
+      const map=new Map(loadArchive().map(x=>[x.pid,x]));
+      data.forEach(x=>{if(x.pid&&x.savedAt)map.set(x.pid,x);});
+      const merged=[...map.values()].sort((a,b)=>new Date(b.savedAt)-new Date(a.savedAt));
+      localStorage.setItem(ARCHIVE_KEY,JSON.stringify(merged));
+      onDone(merged.length);
+    }catch(ex){alert('Invalid backup file: '+ex.message);}
+  };
+  r.readAsText(file);
+}
+
+// ── Face detection — face-api.js 68-point landmark model ──────────────────────
+let _faceApiState='idle';
+let _faceApiQ=[];
+const _FACEAPI_CDN='https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js';
+const _FACEAPI_MODELS='https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights';
+
+async function ensureFaceApi(onStatus){
+  if(_faceApiState==='ready') return true;
+  if(_faceApiState==='failed') return false;
+  if(_faceApiState==='loading') return new Promise(r=>_faceApiQ.push(r));
+  _faceApiState='loading';
+  try{
+    if(!window.faceapi){
+      onStatus?.('Loading AI model (first time only)…');
+      await new Promise((res,rej)=>{
+        const s=document.createElement('script');s.src=_FACEAPI_CDN;
+        s.onload=res;s.onerror=rej;document.head.appendChild(s);
+      });
+    }
+    onStatus?.('Loading 68-point landmark model…');
+    await Promise.all([
+      window.faceapi.nets.tinyFaceDetector.loadFromUri(_FACEAPI_MODELS),
+      window.faceapi.nets.faceLandmark68TinyNet.loadFromUri(_FACEAPI_MODELS),
+    ]);
+    _faceApiState='ready';
+    _faceApiQ.forEach(r=>r(true));_faceApiQ=[];
+    return true;
+  }catch(e){
+    console.warn('face-api.js load failed:',e.message);
+    _faceApiState='failed';
+    _faceApiQ.forEach(r=>r(false));_faceApiQ=[];
+    return false;
+  }
+}
+
+function map68ToLms(pts,photoType){
+  const p=pts;
+  const mx=(a,b)=>({x:(a.x+b.x)/2,y:(a.y+b.y)/2});
+  if(photoType==='frontal'){
+    const gbMid=mx(p[19],p[24]);
+    const gl={x:gbMid.x,y:gbMid.y-Math.abs(p[27].y-gbMid.y)*0.4};
+    return[
+      {id:'Gl', x:gl.x,              y:gl.y,                           c:.88},
+      {id:'N',  x:p[27].x,           y:p[27].y,                        c:.92},
+      {id:'ExR',x:p[36].x,           y:p[36].y,                        c:.94},
+      {id:'EnR',x:p[39].x,           y:p[39].y,                        c:.94},
+      {id:'EnL',x:p[42].x,           y:p[42].y,                        c:.94},
+      {id:'ExL',x:p[45].x,           y:p[45].y,                        c:.94},
+      {id:'Prn',x:p[30].x,           y:p[30].y,                        c:.91},
+      {id:'AlR',x:p[31].x,           y:p[31].y,                        c:.87},
+      {id:'AlL',x:p[35].x,           y:p[35].y,                        c:.87},
+      {id:'Sn', x:p[33].x,           y:p[33].y+(p[51].y-p[33].y)*.35, c:.86},
+      {id:'Ls', x:mx(p[50],p[52]).x, y:p[51].y,                        c:.90},
+      {id:'ChR',x:p[48].x,           y:p[48].y,                        c:.93},
+      {id:'ChL',x:p[54].x,           y:p[54].y,                        c:.93},
+      {id:'Li', x:p[57].x,           y:p[57].y,                        c:.90},
+      {id:'Me', x:p[8].x,            y:p[8].y,                         c:.88},
+    ];
+  }
+  if(photoType==='smile'){
+    const mw=p[54].x-p[48].x;
+    return[
+      {id:'ChR_s', x:p[48].x,              y:p[48].y,           c:.94},
+      {id:'ChL_s', x:p[54].x,              y:p[54].y,           c:.94},
+      {id:'UI_R',  x:mx(p[49],p[50]).x,    y:mx(p[49],p[50]).y, c:.89},
+      {id:'UI_L',  x:mx(p[52],p[53]).x,    y:mx(p[52],p[53]).y, c:.89},
+      {id:'LI_R',  x:mx(p[59],p[58]).x,    y:mx(p[59],p[58]).y, c:.89},
+      {id:'LI_L',  x:mx(p[55],p[56]).x,    y:mx(p[55],p[56]).y, c:.89},
+      {id:'LL_mid',x:p[57].x,              y:p[57].y,           c:.91},
+      {id:'UDM_s', x:(p[48].x+p[54].x)/2, y:p[51].y,           c:.84},
+      {id:'BCR',   x:p[48].x-mw*.22,       y:p[48].y,           c:.72},
+      {id:'BCL',   x:p[54].x+mw*.22,       y:p[54].y,           c:.72},
+    ];
+  }
+  return null;
+}
+
+async function detectAndRefine(imgEl, photoType, onStatus){
   const defs=LM_MAP[photoType];
   const W=imgEl.naturalWidth,H=imgEl.naturalHeight;
-  let lms=defs.map(d=>({...d,x:d.nx*W,y:d.ny*H,confidence:.60}));
-  if(photoType==='profile') return lms;
-  if(typeof window.FaceDetector==='undefined') return lms;
+  const fallback=defs.map(d=>({...d,x:d.nx*W,y:d.ny*H,confidence:.55}));
+  if(photoType==='profile') return fallback;
+  const ok=await ensureFaceApi(onStatus);
+  if(!ok) return fallback;
   try{
-    const detector=new window.FaceDetector({fastMode:false});
-    const faces=await detector.detect(imgEl);
-    if(!faces.length) return lms;
-    const face=faces[0];
-    const{x:bx,y:by,width:bw,height:bh}=face.boundingBox;
-    if(bw<W*.08||bh<H*.08) return lms;
-    const ldms=face.landmarks||[];
-    const eyes=ldms.filter(l=>l.type==='eye');
-    const noseL=ldms.find(l=>l.type==='nose');
-    const mouthL=ldms.find(l=>l.type==='mouth');
-    if(eyes.length<2) return lms;
-    eyes.sort((a,b)=>a.locations[0].x-b.locations[0].x);
-    const eR=eyes[0].locations[0],eL=eyes[1].locations[0];
-    const eyeOk=(e)=>e.x>bx-20&&e.x<bx+bw+20&&e.y>by-20&&e.y<by+bh+20;
-    if(!eyeOk(eR)||!eyeOk(eL)) return lms;
-    const eyeSpan=eL.x-eR.x;
-    if(eyeSpan<20) return lms;
-    const ew=eyeSpan*.17,cx=(eR.x+eL.x)/2,ey=(eR.y+eL.y)/2;
-    let nX=cx,nY=ey+eyeSpan*.72;
-    if(noseL){const np=noseL.locations[0];if(np.y>ey+10&&np.y<by+bh&&np.x>bx&&np.x<bx+bw){nX=np.x;nY=np.y;}}
-    let mX=cx,mY=ey+eyeSpan*1.18;
-    if(mouthL){const mp=mouthL.locations[0];if(mp.y>nY+10&&mp.y<by+bh&&mp.x>bx&&mp.x<bx+bw){mX=mp.x;mY=mp.y;}}
-    const ic=eyeSpan*.14;
-    function clamp(x,y){return[Math.max(bx,Math.min(bx+bw,x)),Math.max(by,Math.min(by+bh,y))];}
-    if(photoType==='frontal'){
-      const pts={
-        'Gl':clamp(cx,by+bh*.04),'N':clamp(cx,ey-eyeSpan*.09),
-        'ExR':clamp(eR.x-ew,eR.y),'EnR':clamp(eR.x+ew,eR.y+1),
-        'EnL':clamp(eL.x-ew,eL.y+1),'ExL':clamp(eL.x+ew,eL.y),
-        'Prn':clamp(nX,nY),'AlR':clamp(nX-ic,nY+eyeSpan*.08),'AlL':clamp(nX+ic,nY+eyeSpan*.08),
-        'Sn':clamp(nX,nY+eyeSpan*.20),'Ls':clamp(mX,mY-5),
-        'ChR':clamp(mX-eyeSpan*.28,mY),'ChL':clamp(mX+eyeSpan*.28,mY),
-        'Li':clamp(mX,mY+6),'Me':clamp(cx,by+bh*.97),
-      };
-      return lms.map(lm=>{const p=pts[lm.id];return p?{...lm,x:p[0],y:p[1],confidence:.90}:lm;});
-    }
-    if(photoType==='smile'){
-      const mw=eyeSpan*.42;
-      const pts={
-        'ChR_s':clamp(mX-mw,mY),'ChL_s':clamp(mX+mw,mY),
-        'UI_R':clamp(mX-5,mY-5),'UI_L':clamp(mX+5,mY-5),
-        'LI_R':clamp(mX-5,mY+6),'LI_L':clamp(mX+5,mY+6),
-        'LL_mid':clamp(mX,mY+16),'UDM_s':clamp(mX,mY-3),
-        'BCR':clamp(mX-mw*1.55,mY),'BCL':clamp(mX+mw*1.55,mY),
-      };
-      return lms.map(lm=>{const p=pts[lm.id];return p?{...lm,x:p[0],y:p[1],confidence:.85}:lm;});
-    }
-  }catch(e){console.warn('FaceDetector:',e.message);}
-  return lms;
+    onStatus?.('Detecting face…');
+    const det=await window.faceapi
+      .detectSingleFace(imgEl,new window.faceapi.TinyFaceDetectorOptions({inputSize:512,scoreThreshold:.3}))
+      .withFaceLandmarks(true);
+    if(!det){onStatus?.('No face found — using default positions');return fallback;}
+    const pts=det.landmarks.positions;
+    const mapped=map68ToLms(pts,photoType);
+    if(!mapped) return fallback;
+    const defMap=Object.fromEntries(defs.map(d=>[d.id,d]));
+    return mapped.map(lm=>({...defMap[lm.id],x:lm.x,y:lm.y,confidence:lm.c}));
+  }catch(e){
+    console.warn('face-api detect error:',e.message);
+    return fallback;
+  }
 }
+
 
 // ── Geometry & analysis helpers ────────────────────────────────────────────────
 function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
@@ -585,6 +669,7 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
   const [mode,setMode]=useState('normal');
   const [addPick,setAddPick]=useState(null);
   const [detecting,setDetecting]=useState(!initialLms);
+  const [detectMsg,setDetectMsg]=useState('');
   const canvasRef=useRef(null),imgRef=useRef(null),drawAllRef=useRef(null),wrapRef=useRef(null);
   const [canvasW,setCanvasW]=useState(560);
 
@@ -664,7 +749,7 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
     if(initialLms){setDetecting(false);return;}
     setDetecting(true);
     const img=new Image();img.src=imageUrl;
-    img.onload=async()=>{const r=await detectAndRefine(img,photoType);setLms(r);setDetecting(false);};
+    img.onload=async()=>{const r=await detectAndRefine(img,photoType,msg=>setDetectMsg(msg));setLms(r);setDetecting(false);setDetectMsg('');};
     img.onerror=()=>setDetecting(false);
   },[]);
 
@@ -766,8 +851,8 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
           {detecting&&(
             <div className="det-overlay">
               <div className="spinner-lg" style={{borderColor:'rgba(255,255,255,.3)',borderTopColor:'#fff'}}/>
-              <p>Detecting landmarks…</p>
-              <p style={{fontSize:11,opacity:.7}}>{photoType==='profile'?'Using anatomical defaults for profile':'Using AI face detection'}</p>
+              <p>{detectMsg||'Detecting landmarks…'}</p>
+              <p style={{fontSize:11,opacity:.7}}>{photoType==='profile'?'Anatomical defaults for profile view':'68-point AI landmark model'}</p>
             </div>
           )}
           <canvas ref={canvasRef} width={canvasW} height={canvasH}
@@ -1068,9 +1153,21 @@ function ArchivePage({onViewPatient,onBack}){
           <div>
             <p style={{fontSize:11,color:'rgba(255,255,255,.4)',fontWeight:700,letterSpacing:'.08em',textTransform:'uppercase',marginBottom:5}}>Patient Archive</p>
             <h1 style={{fontSize:22,fontWeight:800,color:'#fff',letterSpacing:'-.02em'}}>📁 Patient Library</h1>
-            <p style={{fontSize:12,color:'rgba(255,255,255,.45)',marginTop:5}}>{patients.length} patient record{patients.length!==1?'s':''} saved on this device</p>
+            <p style={{fontSize:12,color:'rgba(255,255,255,.45)',marginTop:5}}>{patients.length} patient record{patients.length!==1?'s':''} · saved in browser storage</p>
           </div>
-          <button className="btn btn-secondary" onClick={onBack}>← New Analysis</button>
+          <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+            <button className="btn btn-secondary" style={{fontSize:12,padding:'7px 12px'}} onClick={exportArchiveBackup} title="Download all records as a .json backup file">
+              💾 Backup
+            </button>
+            <label className="btn btn-secondary" style={{fontSize:12,padding:'7px 12px',cursor:'pointer'}} title="Restore records from a backup file">
+              📂 Restore
+              <input type="file" accept=".json" style={{display:'none'}} onChange={e=>{
+                if(e.target.files[0]) importArchiveBackup(e.target.files[0],count=>{setPatients(loadArchive());alert(`✅ Done! Archive now has ${count} patients.`);});
+                e.target.value='';
+              }}/>
+            </label>
+            <button className="btn btn-secondary" onClick={onBack}>← New Analysis</button>
+          </div>
         </div>
       </div>
       <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:4}}>
@@ -1096,6 +1193,19 @@ function ArchivePage({onViewPatient,onBack}){
                 <button className="archive-del" title={delConfirm===p.pid?'Click again to confirm':'Delete patient'} onClick={e=>handleDelete(p.pid,e)}>
                   {delConfirm===p.pid?'⚠':'🗑'}
                 </button>
+                {/* Thumbnail strip */}
+                {(p.thumbnails?.frontal||p.thumbnails?.profile||p.thumbnails?.smile)&&(
+                  <div style={{display:'flex',gap:3,marginBottom:10,borderRadius:8,overflow:'hidden',border:'1px solid var(--gray-100)'}}>
+                    {['frontal','profile','smile'].map(k=>
+                      p.thumbnails?.[k]?(
+                        <img key={k} src={p.thumbnails[k]} alt={k}
+                          style={{flex:1,height:56,objectFit:'cover',display:'block'}}/>
+                      ):(
+                        <div key={k} style={{flex:1,height:56,background:'var(--gray-100)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:18,color:'var(--gray-300)'}}>📷</div>
+                      )
+                    )}
+                  </div>
+                )}
                 <div className="archive-pid">{p.pid}</div>
                 <div className="archive-ts">🕐 {r.ts||'—'}</div>
                 <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>
@@ -1162,10 +1272,21 @@ function App(){
     if(curIdx<REVIEW_STAGES.length-1){setStage(REVIEW_STAGES[curIdx+1]);}
     else{
       setStage('analysing');
-      setTimeout(()=>{
+      setTimeout(async()=>{
         try{
           const r=doAnalyse(next,ipdMm);
-          const rec={pid,ipdMm,report:{...r,pid},savedAt:new Date().toISOString()};
+          // Generate compressed thumbnails for each photo
+          const thumbs={};
+          for(const k of PHOTO_KEYS){
+            if(previews[k]) thumbs[k]=await generateThumbnail(previews[k]);
+          }
+          const rec={
+            pid,ipdMm,
+            report:{...r,pid},
+            savedAt:new Date().toISOString(),
+            thumbnails:thumbs,
+            landmarks:next,
+          };
           saveToArchive(rec);
           setReport({...r,pid});setStage('results');
         }catch(e){setError('Analysis error: '+e.message);setStage('review-smile');}
