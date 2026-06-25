@@ -856,6 +856,7 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
           <label className="cb-lbl"><input type="checkbox" checked={showLabels} onChange={e=>setShowLabels(e.target.checked)} style={{accentColor:'var(--blue)'}}/>Labels</label>
           {photoType==='frontal'&&<label className="cb-lbl"><input type="checkbox" checked={showMidline} onChange={e=>setShowMidline(e.target.checked)} style={{accentColor:'var(--blue)'}}/>Midline</label>}
           <label className="cb-lbl"><input type="checkbox" checked={showGolden} onChange={e=>setShowGolden(e.target.checked)} style={{accentColor:'#f59e0b'}}/><span style={{color:'#92400e'}}>Golden ratio</span></label>
+          {photoType==='profile'&&<button className="btn btn-secondary" style={{fontSize:11,padding:'3px 10px',marginLeft:6}} title="Mirror all landmarks horizontally" onClick={()=>setLms(prev=>prev.map(l=>({...l,x:imgW-l.x})))}>Flip ↔</button>}
         </div>
       </div>
       {mode==='add'&&(
