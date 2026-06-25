@@ -385,10 +385,10 @@ function map68ToLms(pts,photoType){
       {id:'EnL',x:p[42].x,           y:p[42].y,                        c:.94},
       {id:'ExL',x:p[45].x,           y:p[45].y,                        c:.94},
       {id:'Prn',x:p[30].x,           y:p[30].y,                        c:.91},
-      {id:'AlR',x:p[31].x,           y:p[31].y,                        c:.87},
-      {id:'AlL',x:p[35].x,           y:p[35].y,                        c:.87},
-      {id:'Sn', x:p[33].x,           y:p[33].y+(p[51].y-p[33].y)*.35, c:.86},
-      {id:'Ls', x:mx(p[50],p[52]).x, y:p[51].y,                        c:.90},
+      {id:'AlR',x:p[31].x,           y:p[31].y,                                c:.87},
+      {id:'AlL',x:p[35].x,           y:p[35].y,                                c:.87},
+      {id:'Sn', x:p[33].x,           y:p[33].y+(p[51].y-p[33].y)*.65,         c:.86},
+      {id:'Ls', x:mx(p[50],p[52]).x, y:p[51].y+(p[48].y-p[51].y)*.35,         c:.90},
       {id:'ChR',x:p[48].x,           y:p[48].y,                        c:.93},
       {id:'ChL',x:p[54].x,           y:p[54].y,                        c:.93},
       {id:'Li', x:p[57].x,           y:p[57].y,                        c:.90},
@@ -417,7 +417,26 @@ async function detectAndRefine(imgEl, photoType, onStatus){
   const defs=LM_MAP[photoType];
   const W=imgEl.naturalWidth,H=imgEl.naturalHeight;
   const fallback=defs.map(d=>({...d,x:d.nx*W,y:d.ny*H,confidence:.55}));
-  if(photoType==='profile') return fallback;
+  if(photoType==='profile'){
+    // Detect face bounding box to determine which direction the face is pointing
+    const okP=await ensureFaceApi(onStatus);
+    if(okP){
+      try{
+        onStatus?.('Detecting face orientation…');
+        const detP=await window.faceapi
+          .detectSingleFace(imgEl,new window.faceapi.TinyFaceDetectorOptions({inputSize:512,scoreThreshold:.2}));
+        if(detP){
+          const faceCenter=detP.box.x+detP.box.width/2;
+          if(faceCenter>W*0.5){
+            // Face is on the right half → face pointing right → flip all x positions
+            onStatus?.('Face facing right — mirroring landmarks…');
+            return defs.map(d=>({...d,x:(1-d.nx)*W,y:d.ny*H,confidence:.58}));
+          }
+        }
+      }catch(e){}
+    }
+    return fallback;
+  }
   const ok=await ensureFaceApi(onStatus);
   if(!ok) return fallback;
   try{
