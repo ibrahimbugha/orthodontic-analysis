@@ -406,36 +406,64 @@ function mapMPtoLms(lms,W,H,photoType){
   if(photoType==='profile'){
     // nose tip x > 0.5 → face points RIGHT in image
     const faceRight=lms[4].x>0.5;
-    // Tragus: face points RIGHT → we see patient's LEFT side → LEFT ear visible → image-RIGHT = index 454
-    //         face points LEFT  → we see patient's RIGHT side → RIGHT ear visible → image-LEFT = index 234
-    const tragus=faceRight ? p(454) : p(234);
-    const prn=p(4);          // pronasale — nose tip, always reliable
-    const nasion=p(168);     // sellion / nasion — reliable
-    const gl=p(9);           // forehead midline — best MediaPipe glabella approx
-    const cm=mx(p(4),p(2));  // columella — between nose tip and subnasal point
-    const sn=p(2);           // subnasale — base of nasal septum
-    // p(13) = labrale superius (upper lip most forward point) — NOT p(0) which is chin
-    const ls=p(13);
-    const sto=mx(p(13),p(14)); // stomion — lips contact point
-    const li=p(14);            // labrale inferius — lower lip
-    // Soft tissue B: posterior concavity between lower lip and chin
-    // Weighted blend — B sits ~65% of the way from li to me in y, but is x-retruded
-    const b_pt={x:p(14).x*0.30+p(152).x*0.70, y:p(14).y*0.35+p(152).y*0.65};
-    const pog=p(199);    // soft tissue pogonion — most forward chin point
-    const me=p(152);     // menton — lowest chin
+    // dir: +1 = face points right, -1 = face points left
+    // posterior direction (toward ear) = -dir * magnitude
+    const dir=faceRight?1:-1;
+
+    // --- RELIABLE from MediaPipe in profile (on the visible silhouette) ---
+    const prn=p(4);           // pronasale (nose tip) — always reliable
+    const me=p(152);          // menton (chin bottom) — reliable
+    const sn=p(2);            // subnasale — reasonable
+    const ls=p(13);           // labrale superius (upper lip) — reliable
+    const li=p(14);           // labrale inferius (lower lip) — reliable
+    const sto=mx(ls,li);      // stomion
+    const cm=mx(prn,sn);      // columella
+
+    // --- CALCULATED PROPORTIONALLY (p(9) and p(168) land in hair in profile) ---
+    const faceH=me.y-prn.y;   // nose-tip to chin in px
+    const totFH=faceH/0.48;   // estimated full face height (hairline→chin)
+
+    // Nasion: on nose bridge, above nose tip (~17% of total face height above prn)
+    // slightly posterior to nose tip
+    const nasion={
+      x: prn.x - dir*totFH*0.03,
+      y: prn.y - totFH*0.17
+    };
+    // Glabella: above nasion (~8% totFH), slightly anterior
+    const gl={
+      x: nasion.x + dir*totFH*0.015,
+      y: nasion.y - totFH*0.08
+    };
+    // Pogonion: most forward chin point — near nose x level, slightly posterior
+    const pog={
+      x: prn.x - dir*totFH*0.08,
+      y: me.y  - totFH*0.05
+    };
+    // Soft-tissue B: between lower lip and pogonion, more posterior
+    const b_pt={
+      x: li.x*0.25 + pog.x*0.75,
+      y: li.y*0.25 + pog.y*0.75
+    };
+    // Tragus: far posterior from nose, approximately at nasion height
+    // ear is ~42-48% of total face height posterior to nose tip
+    const tragus={
+      x: prn.x - dir*totFH*0.45,
+      y: nasion.y + totFH*0.04
+    };
+
     return[
-      {id:'Gl_p',  x:gl.x,     y:gl.y,     c:.80},
-      {id:'N_p',   x:nasion.x, y:nasion.y,  c:.90},
-      {id:'Prn_p', x:prn.x,    y:prn.y,     c:.93},
-      {id:'Cm',    x:cm.x,     y:cm.y,      c:.85},
-      {id:'Sn_p',  x:sn.x,     y:sn.y,      c:.87},
-      {id:'Ls_p',  x:ls.x,     y:ls.y,      c:.88},
-      {id:'Sto',   x:sto.x,    y:sto.y,     c:.86},
-      {id:'Li_p',  x:li.x,     y:li.y,      c:.88},
-      {id:'B_p',   x:b_pt.x,   y:b_pt.y,    c:.78},
-      {id:'Pog_p', x:pog.x,    y:pog.y,     c:.84},
-      {id:'Me_p',  x:me.x,     y:me.y,      c:.87},
-      {id:'T',     x:tragus.x, y:tragus.y,  c:.89},
+      {id:'Gl_p',  x:gl.x,     y:gl.y,     c:.68},
+      {id:'N_p',   x:nasion.x, y:nasion.y, c:.72},
+      {id:'Prn_p', x:prn.x,    y:prn.y,    c:.93},
+      {id:'Cm',    x:cm.x,     y:cm.y,     c:.85},
+      {id:'Sn_p',  x:sn.x,     y:sn.y,     c:.87},
+      {id:'Ls_p',  x:ls.x,     y:ls.y,     c:.88},
+      {id:'Sto',   x:sto.x,    y:sto.y,    c:.86},
+      {id:'Li_p',  x:li.x,     y:li.y,     c:.88},
+      {id:'B_p',   x:b_pt.x,   y:b_pt.y,  c:.70},
+      {id:'Pog_p', x:pog.x,    y:pog.y,    c:.72},
+      {id:'Me_p',  x:me.x,     y:me.y,     c:.87},
+      {id:'T',     x:tragus.x, y:tragus.y, c:.68},
     ];
   }
   if(photoType==='smile'){
@@ -860,8 +888,10 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
       setLms(prev=>prev.map(lm=>lm.id===drag.id?{...lm,x,y}:lm));
     }else if(panDrag){
       const nx=panDrag.px+(mx-panDrag.sx),ny=panDrag.py+(my-panDrag.sy);
-      // Clamp: keep at least half the image visible
-      const minX=-(zdw-cvW/2),maxX=cvW/2,minY=-(zdh-cvH/2),maxY=cvH/2;
+      // Clamp: keep at least 80px of image visible in viewport
+      const margin=80,imgLeft0=Math.round(ox*zoom);
+      const minX=margin-imgLeft0-zdw, maxX=cvW-margin-imgLeft0;
+      const minY=margin-zdh,          maxY=cvH-margin;
       setPan({x:Math.max(minX,Math.min(maxX,nx)),y:Math.max(minY,Math.min(maxY,ny))});
     }else{
       const hit=hitTest(mx,my),hid=hit?.id??null;
@@ -937,7 +967,7 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
           )}
           <canvas ref={canvasRef} width={cvW} height={cvH}
             onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
-            onTouchStart={onDown} onTouchEnd={onUp} onWheel={onWheel}
+            onTouchStart={onDown} onTouchMove={onMove} onTouchEnd={onUp} onWheel={onWheel}
             style={{display:'block'}}/>
         </div>
         <div className="sidebar">
