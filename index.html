@@ -558,6 +558,14 @@ function ptLineSigned(px,py,ax,ay,bx,by){
 }
 function g(lms,id){return lms.find(l=>l.id===id)}
 function r1(v){return v!==null&&v!==undefined?Math.round(v*10)/10:null}
+// Determine face direction from profile landmarks (+1 = face-right, -1 = face-left).
+// Uses Prn_p vs N_p: nose tip is always more anterior than nasion.
+function getFaceDir(profile){
+  const prn=g(profile,'Prn_p'),np=g(profile,'N_p'),me=g(profile,'Me_p');
+  if(prn&&np) return prn.x>np.x?1:-1;
+  if(prn&&me) return prn.x>me.x?1:-1;
+  return -1; // default: face-left (most common clinical convention)
+}
 
 function calibScale(frontal,ipdMm){
   const exR=g(frontal,'ExR'),exL=g(frontal,'ExL');
@@ -585,7 +593,7 @@ function analyseThirds(frontal,sc){
   const gl=g(frontal,'Gl'),sn=g(frontal,'Sn'),me=g(frontal,'Me');
   if(!gl||!sn||!me)return{flag:'missing_data'};
   const total=me.y-gl.y;if(total<=0)return{flag:'missing_data'};
-  const midPct=r1((sn.y-gl.y)/total*100),lowPct=r1((me.y-sn.y)/total*100),upPct=r1(100-midPct-lowPct);
+  const midPct=r1((sn.y-gl.y)/total*100),lowPct=r1((me.y-sn.y)/total*100),upPct=Math.max(0,r1(100-midPct-lowPct));
   const maxDev=Math.max(Math.abs(midPct-33.3),Math.abs(lowPct-33.3));
   return{upPct,midPct,lowPct,flag:maxDev>5?'abnormal':maxDev>3?'borderline':'within_normal_limits'};
 }
@@ -593,9 +601,18 @@ function analyseSkeletal(profile,sc){
   const prn=g(profile,'Prn_p'),sn=g(profile,'Sn_p'),ls=g(profile,'Ls_p');
   const li=g(profile,'Li_p'),pog=g(profile,'Pog_p'),cm=g(profile,'Cm');
   const nasolabial=cm&&sn&&ls?angleDeg(cm,sn,ls):null;
+  // fdir: +1=face-right, -1=face-left. Used to normalise sign convention so that
+  // positive E-plane values always mean "anterior to E-line" (protrusive)
+  // and positive pogSn always means "Pog in front of Sn vertical" (Class III direction).
+  const fdir=getFaceDir(profile);
   let upperE=null,lowerE=null,pogSn=null;
-  if(prn&&pog&&ls&&li&&sc){upperE=r1(ptLineSigned(ls.x,ls.y,prn.x,prn.y,pog.x,pog.y)*sc);lowerE=r1(ptLineSigned(li.x,li.y,prn.x,prn.y,pog.x,pog.y)*sc);}
-  if(pog&&sn&&sc)pogSn=r1((pog.x-sn.x)*sc);
+  if(prn&&pog&&ls&&li&&sc){
+    // ptLineSigned gives opposite sign for face-right vs face-left; multiply by -fdir to normalise.
+    upperE=r1(-fdir*ptLineSigned(ls.x,ls.y,prn.x,prn.y,pog.x,pog.y)*sc);
+    lowerE=r1(-fdir*ptLineSigned(li.x,li.y,prn.x,prn.y,pog.x,pog.y)*sc);
+  }
+  // pog.x-sn.x: positive=anterior for face-right, negative=anterior for face-left → multiply by fdir.
+  if(pog&&sn&&sc)pogSn=r1(fdir*(pog.x-sn.x)*sc);
   let cls='Class I';
   if(lowerE!==null){if(lowerE>1)cls='Class III tendency';else if(lowerE<-4)cls='Class II tendency';}
   return{cls,nasolabial,upperE,lowerE,pogSn};
@@ -610,8 +627,12 @@ function analyseLip(profile,sc){
   const gap=ls&&li?Math.max(0,mm(li.y-ls.y)):null;
   const nasolabial=cm&&sn&&ls?angleDeg(cm,sn,ls):null;
   const mentolabial=li&&b&&pog?angleDeg(li,b,pog):null;
+  const fdir=getFaceDir(profile);
   let upperE=null,lowerE=null;
-  if(prn&&pog&&ls&&li&&sc){upperE=r1(ptLineSigned(ls.x,ls.y,prn.x,prn.y,pog.x,pog.y)*sc);lowerE=r1(ptLineSigned(li.x,li.y,prn.x,prn.y,pog.x,pog.y)*sc);}
+  if(prn&&pog&&ls&&li&&sc){
+    upperE=r1(-fdir*ptLineSigned(ls.x,ls.y,prn.x,prn.y,pog.x,pog.y)*sc);
+    lowerE=r1(-fdir*ptLineSigned(li.x,li.y,prn.x,prn.y,pog.x,pog.y)*sc);
+  }
   const flags=[];
   if(ulLen&&(ulLen<19||ulLen>24))flags.push(1);
   if(gap!==null&&gap>3)flags.push(1);
@@ -794,7 +815,6 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
   const zsc=sc*zoom,zdw=dw*zoom,zdh=dh*zoom;
   const zox=Math.round(ox*zoom)+pan.x, zoy=pan.y;
   const cvW=canvasW, cvH=baseH;
-  const canvasH=cvH;
   const pointR=Math.max(2,Math.round(BASE_R*dotSize));
   const toCanvas=(lm)=>({cx:zox+lm.x*zsc,cy:zoy+lm.y*zsc});
   const toImg=(cx,cy)=>({x:(cx-zox)/zsc,y:(cy-zoy)/zsc});
@@ -868,9 +888,10 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
 
   useEffect(()=>{
     const cvs=canvasRef.current;if(!cvs)return;
-    const fn=(e)=>{if(drag)e.preventDefault();};
+    // Prevent page scroll during both point-drag and canvas-pan gestures.
+    const fn=(e)=>{if(drag||panDrag)e.preventDefault();};
     cvs.addEventListener('touchmove',fn,{passive:false});return()=>cvs.removeEventListener('touchmove',fn);
-  },[drag]);
+  },[drag,panDrag]);
 
   useEffect(()=>{
     function onKey(e){
@@ -924,8 +945,19 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
   function onUp(){setDrag(null);setPanDrag(null);if(canvasRef.current)canvasRef.current.style.cursor=mode==='add'?'crosshair':zoom>1.0?'grab':'default';}
   function onWheel(e){
     e.preventDefault();
-    const delta=e.deltaY<0?1.15:1/1.15;
-    setZoom(z=>Math.max(0.5,Math.min(4.0,+(z*delta).toFixed(3))));
+    const{mx,my}=getPos(e);
+    const factor=e.deltaY<0?1.15:1/1.15;
+    const nz=Math.max(0.5,Math.min(4.0,+(zoom*factor).toFixed(3)));
+    if(nz<=1.0){setZoom(1.0);setPan({x:0,y:0});return;}
+    // Zoom toward the mouse cursor: keep the image-pixel under the cursor fixed.
+    const zoxOld=Math.round(ox*zoom)+pan.x;
+    const zoyOld=pan.y;
+    const ratio=nz/zoom;
+    // New canvas origin such that (mx,my) maps to the same image point before and after zoom.
+    const newZox=mx-(mx-zoxOld)*ratio;
+    const newZoy=my-(my-zoyOld)*ratio;
+    setZoom(nz);
+    setPan({x:newZox-Math.round(ox*nz),y:newZoy});
   }
 
   const movedCount=lms.filter(lm=>{const o=origLms.find(ol=>ol.id===lm.id);return o&&(Math.abs(lm.x-o.x)>1||Math.abs(lm.y-o.y)>1);}).length;
@@ -979,7 +1011,7 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
         </div>
       )}
       <div className="editor-layout">
-        <div className="canvas-wrap" ref={wrapRef} style={{position:'relative',overflow:'hidden'}}>
+        <div className="canvas-wrap" ref={wrapRef}>
           {detecting&&(
             <div className="det-overlay">
               <div className="spinner-lg" style={{borderColor:'rgba(255,255,255,.3)',borderTopColor:'#fff'}}/>
