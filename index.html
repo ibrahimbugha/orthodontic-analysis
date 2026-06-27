@@ -943,8 +943,11 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
     }
   }
   function onUp(){setDrag(null);setPanDrag(null);if(canvasRef.current)canvasRef.current.style.cursor=mode==='add'?'crosshair':zoom>1.0?'grab':'default';}
-  function onWheel(e){
-    e.preventDefault();
+
+  // Keep a ref to the latest wheel handler so the non-passive useEffect never goes stale.
+  const onWheelRef=useRef(null);
+  onWheelRef.current=function(e){
+    e.preventDefault(); // works because listener is registered as non-passive below
     const{mx,my}=getPos(e);
     const factor=e.deltaY<0?1.15:1/1.15;
     const nz=Math.max(0.5,Math.min(4.0,+(zoom*factor).toFixed(3)));
@@ -953,12 +956,19 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
     const zoxOld=Math.round(ox*zoom)+pan.x;
     const zoyOld=pan.y;
     const ratio=nz/zoom;
-    // New canvas origin such that (mx,my) maps to the same image point before and after zoom.
     const newZox=mx-(mx-zoxOld)*ratio;
     const newZoy=my-(my-zoyOld)*ratio;
     setZoom(nz);
     setPan({x:newZox-Math.round(ox*nz),y:newZoy});
-  }
+  };
+  // Register as non-passive so e.preventDefault() actually stops page scroll.
+  // React's synthetic onWheel is passive in modern browsers and cannot prevent scroll.
+  useEffect(()=>{
+    const cvs=canvasRef.current;if(!cvs)return;
+    const fn=(e)=>onWheelRef.current(e);
+    cvs.addEventListener('wheel',fn,{passive:false});
+    return()=>cvs.removeEventListener('wheel',fn);
+  },[]);
 
   const movedCount=lms.filter(lm=>{const o=origLms.find(ol=>ol.id===lm.id);return o&&(Math.abs(lm.x-o.x)>1||Math.abs(lm.y-o.y)>1);}).length;
   const byCategory={};
@@ -1021,7 +1031,7 @@ function LandmarkEditor({photoType,imageUrl,imgW,imgH,onConfirm,onBack,initialLm
           )}
           <canvas ref={canvasRef} width={cvW} height={cvH}
             onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}
-            onTouchStart={onDown} onTouchMove={onMove} onTouchEnd={onUp} onWheel={onWheel}
+            onTouchStart={onDown} onTouchMove={onMove} onTouchEnd={onUp}
             style={{display:'block'}}/>
         </div>
         <div className="sidebar">
