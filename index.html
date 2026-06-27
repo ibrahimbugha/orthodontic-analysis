@@ -245,7 +245,7 @@ const LM_PROFILE = [
   {id:'B_p',   name:'Soft Tissue B Point',   nx:.602,ny:.618,cat:'skeletal',    desc:'نقطة B — المنطقة المقعرة بين الشفة السفلى والذقن\nConcave area between lower lip and chin'},
   {id:'Pog_p', name:'Soft Tissue Pogonion',  nx:.616,ny:.656,cat:'skeletal',    desc:'بوغونيون — أكثر نقطة تقدماً للأمام في الذقن\nMost anterior (forward) point of soft tissue chin'},
   {id:'Me_p',  name:"Menton (Me')",          nx:.592,ny:.708,cat:'skeletal',    desc:'المينتون — أدنى نقطة في الذقن من الجانب\nLowest point of chin from side view'},
-  {id:'T',     name:'Tragus of Ear',         nx:.242,ny:.338,cat:'soft_tissue', desc:'زنمة الأذن — النتوء الغضروفي أمام فتحة قناة الأذن\nCartilage bump directly in front of ear canal opening'},
+  {id:'T',     name:'Tragus of Ear',         nx:.242,ny:.410,cat:'soft_tissue', desc:'زنمة الأذن — النتوء الغضروفي أمام فتحة قناة الأذن\nCartilage bump directly in front of ear canal opening'},
 ];
 const LM_SMILE = [
   {id:'ChR_s', name:'Mouth Corner (R)',      nx:.345,ny:.528,cat:'soft_tissue', desc:'زاوية الفم اليمنى — ملتقى الشفتين عند الابتسامة\nRight commissure (corner of mouth) during smile'},
@@ -414,10 +414,11 @@ function mapMPtoLms(lms,W,H,photoType){
     const meRaw=p(152);  // menton — y reliable, x may be off (MediaPipe projects inside face)
     const faceH=meRaw.y-prn.y;
 
-    // Sanity check — if face height is implausible, bail out so caller uses smart fallback
-    if(faceH<H*0.12||faceH<=0) return null;
+    // Sanity check — if face height is implausible, bail out so caller uses anchor fallback
+    if(faceH<H*0.06||faceH<=0) return null;
 
-    const totFH=faceH/0.48; // estimated full face height (hairline to chin)
+    // Clamp totFH to avoid wild values from noisy MediaPipe output in profile view
+    const totFH=Math.max(H*0.30,Math.min(H*1.10,faceH/0.48)); // estimated full face height
 
     // Reliable silhouette landmarks from MediaPipe
     const sn=p(2);           // subnasale
@@ -435,7 +436,8 @@ function mapMPtoLms(lms,W,H,photoType){
     const gl    ={x:nasion.x+dir*totFH*0.015, y:nasion.y-totFH*0.08};
     const pog   ={x:me.x,                     y:me.y-totFH*0.05};
     const b_pt  ={x:li.x*0.20+pog.x*0.80,     y:li.y*0.20+pog.y*0.80};
-    const tragus={x:prn.x-dir*totFH*0.45,     y:nasion.y+totFH*0.03};
+    // Tragus: same horizontal level as nasal tip (not nasion!) — ear canal is at alar base height
+    const tragus={x:prn.x-dir*totFH*0.46,     y:prn.y+totFH*0.06};
 
     return[
       {id:'Gl_p',  x:gl.x,     y:gl.y,     c:.65},
@@ -485,6 +487,33 @@ function mapMPtoLms(lms,W,H,photoType){
   return null;
 }
 
+// Proportional profile landmark placement anchored on detected nose tip + face height.
+// Used when MediaPipe detects the face but faceH fails the strict sanity check,
+// giving far better placement than pure image-proportion defaults.
+function profileFromAnchor(prnX,prnY,faceH,dir,W,H,defs){
+  const totFH=Math.max(H*0.28,Math.min(H*1.0,faceH/0.48));
+  const pt=(x,y)=>({x,y});
+  const nasion=pt(prnX-dir*totFH*0.030, prnY-totFH*0.17);
+  const gl    =pt(nasion.x+dir*totFH*0.015, nasion.y-totFH*0.08);
+  const sn    =pt(prnX-dir*totFH*0.018,  prnY+totFH*0.082);
+  const ls    =pt(prnX-dir*totFH*0.012,  prnY+totFH*0.155);
+  const sto   =pt(prnX-dir*totFH*0.014,  prnY+totFH*0.185);
+  const li    =pt(prnX-dir*totFH*0.010,  prnY+totFH*0.215);
+  const me    =pt(prnX-dir*totFH*0.100,  prnY+totFH*0.48);
+  const pog   =pt(me.x,                  me.y-totFH*0.05);
+  const b_pt  =pt(li.x*0.20+pog.x*0.80, li.y*0.20+pog.y*0.80);
+  const cm    =pt((prnX+sn.x)/2,         (prnY+sn.y)/2);
+  const tragus=pt(prnX-dir*totFH*0.46,   prnY+totFH*0.06);
+  const pts={Gl_p:gl,N_p:nasion,Prn_p:pt(prnX,prnY),Cm:cm,
+             Sn_p:sn,Ls_p:ls,Sto:sto,Li_p:li,B_p:b_pt,Pog_p:pog,Me_p:me,T:tragus};
+  return defs.map(d=>({
+    ...d,
+    x:pts[d.id]?pts[d.id].x:(dir>0?d.nx*W:(1-d.nx)*W),
+    y:pts[d.id]?pts[d.id].y:d.ny*H,
+    confidence:.68
+  }));
+}
+
 async function detectAndRefine(imgEl, photoType, onStatus){
   const defs=LM_MAP[photoType];
   const W=imgEl.naturalWidth,H=imgEl.naturalHeight;
@@ -514,9 +543,14 @@ async function detectAndRefine(imgEl, photoType, onStatus){
             const defMap=Object.fromEntries(defs.map(d=>[d.id,d]));
             return mapped.map(lm=>({...defMap[lm.id],x:lm.x,y:lm.y,confidence:lm.c}));
           }
-          // mapMPtoLms returned null (implausible faceH) — use direction-aware fallback
-          onStatus?.('Proportional profile defaults (face '+(faceRight?'right':'left')+')');
-          return profileFallback(faceRight);
+          // mapMPtoLms returned null (implausible faceH) — but we have nose tip from MediaPipe
+          // Use it as an anchor for proportional placement (much better than image-proportion defaults)
+          const prnX=lms[4].x*W, prnY=lms[4].y*H;
+          const meY=lms[152].y*H;
+          const detFH=meY-prnY;
+          const estFH=detFH>H*0.05 ? detFH : H*0.42;
+          onStatus?.('Anchor-based profile placement (nose tip anchor)');
+          return profileFromAnchor(prnX,prnY,estFH,faceRight?1:-1,W,H,defs);
         }
       }catch(e){console.warn('Profile detect error:',e);}
     }
